@@ -1,0 +1,47 @@
+name: prices
+
+on:
+  schedule:
+    # 05:30 UTC = 07:30 Israel in winter (IST), 08:30 in summer (IDT). Cron is UTC-only.
+    - cron: "30 5 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: prices
+  cancel-in-progress: false
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Unit tests
+        run: python -m unittest discover -s tools/price-ingest/tests
+      - name: Ingest (python stdlib only)
+        run: python tools/price-ingest/price_ingest.py --out price-out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: prices
+          path: price-out/*.json
+          retention-days: 7
+      # Publish to a data-only branch holding a single commit, so daily files never
+      # accumulate in the history of the main code branch.
+      - name: Publish to prices-data branch
+        run: |
+          set -e
+          git config user.name "prices-bot"
+          git config user.email "prices-bot@users.noreply.github.com"
+          mkdir -p /tmp/pub && cp price-out/prices.json price-out/prices.meta.json /tmp/pub/
+          git checkout --orphan prices-data
+          git rm -rf --quiet . || true
+          cp /tmp/pub/* .
+          git add prices.json prices.meta.json
+          git commit -m "prices $(date -u +%Y%m%d%H%M)"
+          git push --force origin prices-data
