@@ -38,10 +38,10 @@ jobs:
           set -e
           git config user.name "prices-bot"
           git config user.email "prices-bot@users.noreply.github.com"
-          mkdir -p /tmp/pub && cp price-out/prices.json price-out/prices.meta.json /tmp/pub/
+          mkdir -p /tmp/pub && cp price-out/prices.json price-out/prices-v2.json price-out/prices.meta.json /tmp/pub/
           git checkout --orphan prices-data
           git rm -rf --quiet . || true
           cp /tmp/pub/* .
-          git add prices.json prices.meta.json
+          git add prices.json prices-v2.json prices.meta.json
           git commit -m "prices $(date -u +%Y%m%d%H%M)"
           git push --force origin prices-data

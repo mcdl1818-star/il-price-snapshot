@@ -9,7 +9,8 @@ Usage:
     python tools/price-ingest/price_ingest.py --contract      # also write the verbose contract file
 
 Outputs (default tools/price-ingest/out/):
-    prices.json          columnar-v1 (compact, see below) - the file the app should fetch
+    prices.json          columnar-v1 (compact, see below) - the file the deployed app fetches
+    prices-v2.json       columnar-v2 = v1 + local (chain-internal code) rows + weighted/brand/local
     prices.contract.json only with --contract: the verbose documented contract (large, ~10x)
     prices.meta.json     small summary: version, per-branch status/counts/errors, sizes
 
@@ -32,6 +33,15 @@ columnar-v1 (prices.json) carries exactly the same information:
     a = priceAgorot; u = unitPriceAgorot (0 = absent); n = unit table index (-1 = none).
     sourceUpdatedAt / fetchedAt / sourceFileId are constant per branch, so hoisted.
     productId is stable across runs: int(barcode without leading zeros).
+
+columnar-v2 (prices-v2.json): same layout, plus
+    productCols ["productId","barcode","name","packageLabel","unit","weighted","brand","local"]
+    barcoded product: [int, barcode, ..., weighted 0/1, brand str or "", 0]
+    local product:    ["L-<chainKey>-<code>", "", ..., weighted, brand, 1]  (chain-scoped, never merged)
+    weighted = 1 if flagged bisweighted in ANY branch carrying it ("weightedConflicts" counts
+    products whose flag differs between branches). brand = manufacturename unless unknown/noise.
+    Name = longer of itemname / manufactureitemdescription. itemstatus is not used (always 0 or
+    empty in live data, no clear meaning).
 
 Prices are regular shelf prices only. PromoFull files are deliberately ignored (promoIgnored).
 Times: version/generatedAt/fetchedAt are UTC. sourceUpdatedAt is the source file's own
@@ -60,6 +70,11 @@ REQUEST_DELAY_S = 0.4
 MIN_ITEMS_PER_BRANCH = 50
 MIN_PRICE_AGOROT = 10  # chains publish 0.01 placeholder rows
 FORMAT_ID = "columnar-v1"
+FORMAT_ID_V2 = "columnar-v2"
+UNKNOWN_BRANDS = {"", "לא ידוע", "unknown", "0", "-", "אחר", "כללי"}
+NOISE_BRAND = re.compile(r"^(מבצעי|מוצרים בפיקוח)|(19|20)\d\d")
+NON_GOODS = re.compile(
+    "שקית|שקיות|משלוח|פיקדון|ארגז בודד|כרטיס מתנה|גיפט|תו שי|תו קנייה|כרטיס טעינה|טעינה סלולר|כרטיס סלולר")
 
 CERBERUS_BASE = "https://url.publishedprices.co.il"
 
@@ -249,28 +264,70 @@ def package_label(qty, unit_qty):
     return f"{q} {unit}"
 
 
-def parse_price_file(data):
-    """Return {barcode: row} (last / newest PriceUpdateTime wins), counting skipped rows."""
-    rows, skipped = {}, 0
+def clean_local_code(value):
+    c = re.sub(r"\s+", "", value or "")
+    return c if c and c.strip("0") else None
+
+
+def clean_brand(value):
+    b = (value or "").strip()
+    return "" if b.lower() in UNKNOWN_BRANDS or NOISE_BRAND.search(b) else b
+
+
+def parse_price_file_ex(data):
+    """-> (rows, stats). rows: {key: row}; key is the barcode, or 'L:<code>' for chain-internal
+    item codes (row['local'] is True). Newest PriceUpdateTime wins per key.
+    stats: kept barcoded / kept local / dropped by reason (invalidPrice, noName, noCode,
+    nonGoods, duplicate)."""
+    rows = {}
+    dropped = {"invalidPrice": 0, "noName": 0, "noCode": 0, "nonGoods": 0, "duplicate": 0}
     for rec in xml_records(data, {"item", "product"}):
-        code = clean_barcode(rec.get("itemcode"))
+        raw_code = rec.get("itemcode")
+        barcode = clean_barcode(raw_code)
+        code = barcode or clean_local_code(raw_code)
         price = to_agorot(rec.get("itemprice"))
         name = (rec.get("itemname") or rec.get("manufactureitemdescription") or "").strip()
-        if not code or price is None or price < MIN_PRICE_AGOROT or not name:
-            skipped += 1
+        longer = (rec.get("manufactureitemdescription") or "").strip()
+        long_name = longer if len(longer) > len(name) else name
+        if not code:
+            dropped["noCode"] += 1
             continue
+        if price is None or price < MIN_PRICE_AGOROT:
+            dropped["invalidPrice"] += 1
+            continue
+        if not name:
+            dropped["noName"] += 1
+            continue
+        if not barcode and NON_GOODS.search(long_name):
+            dropped["nonGoods"] += 1
+            continue
+        key = code if barcode else "L:" + code
         stamp = rec.get("priceupdatetime", "")
-        old = rows.get(code)
-        if old and old["stamp"] > stamp:
-            continue
-        rows[code] = {
-            "stamp": stamp, "name": name, "price": price,
+        old = rows.get(key)
+        if old:
+            dropped["duplicate"] += 1
+            if old["stamp"] > stamp:
+                continue
+        rows[key] = {
+            "stamp": stamp, "name": name, "longName": long_name, "price": price,
             "unitPrice": to_agorot(rec.get("unitofmeasureprice")),
             "unit": (rec.get("unitofmeasure") or "").strip(),
             "packageLabel": package_label(rec.get("quantity"), rec.get("unitqty")),
             "productUnit": (rec.get("unitqty") or "").strip(),
+            "local": not barcode, "code": code,
+            "weighted": 1 if rec.get("bisweighted") == "1" else 0,
+            "brand": clean_brand(rec.get("manufacturename")),
         }
-    return rows, skipped
+    kept_local = sum(1 for r in rows.values() if r["local"])
+    stats = {"keptBarcoded": len(rows) - kept_local, "keptLocal": kept_local, "dropped": dropped}
+    return rows, stats
+
+
+def parse_price_file(data):
+    """v1 view: {barcode: row} for barcoded rows only, plus the number of rows not kept."""
+    rows, stats = parse_price_file_ex(data)
+    barcoded = {k: r for k, r in rows.items() if not r["local"]}
+    return barcoded, sum(stats["dropped"].values()) + stats["keptLocal"] - stats["dropped"]["duplicate"]
 
 
 def parse_stores(data):
@@ -419,12 +476,12 @@ def ingest_branch(chain_key, store, cfg, source, stores_cache, fetched_at):
     ref = newest(files, "PriceFull", int(store))
     if not ref:
         raise IngestError(f"no PriceFull file listed for store {store}")
-    rows, skipped = parse_price_file(source.download(ref))
-    if len(rows) < MIN_ITEMS_PER_BRANCH:
-        raise IngestError(f"only {len(rows)} valid items in {ref.name} (parse problem?)")
+    rows, stats = parse_price_file_ex(source.download(ref))
+    if stats["keptBarcoded"] < MIN_ITEMS_PER_BRANCH:
+        raise IngestError(f"only {stats['keptBarcoded']} valid items in {ref.name} (parse problem?)")
     branch = {"id": bid, "chain": cfg["label"], "name": info["name"], "address": info["address"],
               "status": "available", "sourceUpdatedAt": ref.utc_iso}
-    return branch, rows, ref.name, skipped
+    return branch, rows, ref.name, stats
 
 
 def run_ingest(selected=None, log=print, http_client=None):
@@ -439,10 +496,12 @@ def run_ingest(selected=None, log=print, http_client=None):
         for store in store_ids:
             bid, t0 = branch_id(chain_key, store), time.monotonic()
             try:
-                branch, rows, fname, skipped = ingest_branch(
+                branch, rows, fname, stats = ingest_branch(
                     chain_key, store, cfg, source, stores_cache, fetched_at)
                 per_branch[bid] = (rows, fname, branch["sourceUpdatedAt"])
-                report[bid] = {"status": "available", "items": len(rows), "skippedRows": skipped,
+                report[bid] = {"status": "available", "items": stats["keptBarcoded"],
+                               "skippedRows": sum(stats["dropped"].values()) + stats["keptLocal"]
+                               - stats["dropped"]["duplicate"], **stats,
                                "file": fname, "seconds": round(time.monotonic() - t0, 1)}
             except Exception as e:  # isolate every failure to its branch
                 info = (stores_cache.get("stores") or {}).get(int(store), {})
@@ -460,23 +519,35 @@ def run_ingest(selected=None, log=print, http_client=None):
 
 # --------------------------------------------------------------------------- output formats
 
-def build_documents(branches, per_branch, fetched_at, now=None):
-    """-> (columnar_doc, contract_builder) from per-branch rows."""
+def build_documents(branches, per_branch, fetched_at, now=None, v2=False):
+    """-> columnar document from per-branch rows. v2=False: columnar-v1 (barcoded rows only,
+    byte-compatible with the deployed app). v2=True: columnar-v2 (adds local rows, weighted, brand)."""
     now = now or dt.datetime.now(dt.timezone.utc)
-    master = {}  # barcode key (no leading zeros) -> product dict
+    master = {}  # sort key -> product dict
+    conflicts = 0
     for bid, (rows, _f, _s) in per_branch.items():
-        for code, row in rows.items():
-            p = master.get(code.lstrip("0"))
+        chain = bid.rsplit("-", 1)[0]
+        for key, row in rows.items():
+            local = row.get("local", False)
+            if local and not v2:
+                continue
+            mk = (1, f"L-{chain}-{row['code']}") if local else (0, int(key.lstrip("0")))
+            name = row.get("longName", row["name"]) if v2 else row["name"]
+            p = master.get(mk)
             if p is None:
-                master[code.lstrip("0")] = {
-                    "barcode": code, "name": row["name"], "packageLabel": row["packageLabel"],
-                    "unit": row["productUnit"]}
+                master[mk] = {
+                    "productId": mk[1], "barcode": "" if local else key,
+                    "name": name, "packageLabel": row["packageLabel"], "unit": row["productUnit"],
+                    "weights": {row.get("weighted", 0)}, "brand": row.get("brand", "")}
             else:
-                for k, src in (("name", "name"), ("packageLabel", "packageLabel"),
-                               ("unit", "productUnit")):
-                    if not p[k] and row[src]:
-                        p[k] = row[src]
-    keys = sorted(master, key=lambda k: int(k))
+                for k, val in (("name", name), ("packageLabel", row["packageLabel"]),
+                               ("unit", row["productUnit"]), ("brand", row.get("brand", ""))):
+                    if not p[k] and val:
+                        p[k] = val
+                if v2 and len(name) > len(p["name"]):
+                    p["name"] = name
+                p["weights"].add(row.get("weighted", 0))
+    keys = sorted(master)
     index = {k: i for i, k in enumerate(keys)}
     units, unit_idx = [], {}
 
@@ -488,14 +559,28 @@ def build_documents(branches, per_branch, fetched_at, now=None):
             units.append(u)
         return unit_idx[u]
 
-    products = [[int(k), master[k]["barcode"], master[k]["name"], master[k]["packageLabel"],
-                 uid(master[k]["unit"])] for k in keys]
+    products = []
+    for k in keys:
+        m = master[k]
+        row = [m["productId"], m["barcode"], m["name"], m["packageLabel"], uid(m["unit"])]
+        if v2:
+            conflicts += len(m["weights"]) > 1
+            row += [1 if 1 in m["weights"] else 0, m["brand"], 1 if k[0] else 0]
+        products.append(row)
     price_sets = []
     for b in branches:
         if b["id"] not in per_branch:
             continue
         rows, fname, source_at = per_branch[b["id"]]
-        ordered = sorted(((index[c.lstrip("0")], r) for c, r in rows.items()), key=lambda t: t[0])
+        chain = b["id"].rsplit("-", 1)[0]
+        ordered = []
+        for key, r in rows.items():
+            if r.get("local", False):
+                if v2:
+                    ordered.append((index[(1, f"L-{chain}-{r['code']}")], r))
+            else:
+                ordered.append((index[(0, int(key.lstrip("0")))], r))
+        ordered.sort(key=lambda t: t[0])
         p, prev = [], 0
         for i, _r in ordered:
             p.append(i - prev)
@@ -506,22 +591,32 @@ def build_documents(branches, per_branch, fetched_at, now=None):
             "a": [r["price"] for _i, r in ordered],
             "u": [r["unitPrice"] or 0 for _i, r in ordered],
             "n": [uid(r["unit"]) for _i, r in ordered]})
-    return {
-        "format": FORMAT_ID, "version": now.strftime("%Y%m%d%H%M"), "generatedAt": iso(now),
-        "promoIgnored": True, "branches": branches, "units": units,
-        "productCols": ["productId", "barcode", "name", "packageLabel", "unit"],
+    cols = ["productId", "barcode", "name", "packageLabel", "unit"]
+    doc = {
+        "format": FORMAT_ID_V2 if v2 else FORMAT_ID, "version": now.strftime("%Y%m%d%H%M"),
+        "generatedAt": iso(now), "promoIgnored": True, "branches": branches, "units": units,
+        "productCols": cols + ["weighted", "brand", "local"] if v2 else cols,
         "products": products, "priceSets": price_sets}
+    if v2:
+        doc["weightedConflicts"] = conflicts
+    return doc
 
 
 def expand_columnar(doc):
-    """columnar-v1 -> verbose documented contract."""
+    """columnar-v1 or columnar-v2 -> verbose documented contract (v2 adds weighted/brand/local)."""
     units = doc["units"]
+    v2 = doc.get("format") == FORMAT_ID_V2
 
     def unit(i):
         return units[i] if i >= 0 else ""
 
-    products = [{"productId": str(r[0]), "barcode": r[1], "name": r[2], "packageLabel": r[3],
-                 "unit": unit(r[4])} for r in doc["products"]]
+    products = []
+    for r in doc["products"]:
+        prod = {"productId": str(r[0]), "barcode": r[1], "name": r[2], "packageLabel": r[3],
+                "unit": unit(r[4])}
+        if v2:
+            prod.update(weighted=bool(r[5]), brand=r[6], local=bool(r[7]))
+        products.append(prod)
     prices = []
     for ps in doc["priceSets"]:
         idx = 0
@@ -534,6 +629,9 @@ def expand_columnar(doc):
     return {"version": doc["version"], "generatedAt": doc["generatedAt"],
             "promoIgnored": doc["promoIgnored"], "branches": doc["branches"],
             "products": products, "prices": prices}
+
+
+expand_columnar_v2 = expand_columnar
 
 
 def dumps(obj):
@@ -565,13 +663,20 @@ def main(argv=None):
     raw = dumps(doc)
     write_atomic(os.path.join(args.out, "prices.json"), raw)
     sizes = {"prices.json": {"rawBytes": len(raw), "gzipBytes": len(gzip.compress(raw, 9))}}
+    doc2 = build_documents(branches, per_branch, fetched_at, v2=True)
+    doc2["version"], doc2["generatedAt"] = doc["version"], doc["generatedAt"]
+    raw2 = dumps(doc2)
+    write_atomic(os.path.join(args.out, "prices-v2.json"), raw2)
+    sizes["prices-v2.json"] = {"rawBytes": len(raw2), "gzipBytes": len(gzip.compress(raw2, 9))}
     if args.contract:
         full = dumps(expand_columnar(doc))
         write_atomic(os.path.join(args.out, "prices.contract.json"), full)
         sizes["prices.contract.json"] = {"rawBytes": len(full),
                                          "gzipBytes": len(gzip.compress(full, 9))}
     meta = {"version": doc["version"], "generatedAt": doc["generatedAt"], "format": FORMAT_ID,
-            "promoIgnored": True, "products": len(doc["products"]),
+            "promoIgnored": True, "formatV2": FORMAT_ID_V2, "productsV2": len(doc2["products"]),
+            "weightedProductsV2": sum(1 for r in doc2["products"] if r[5]),
+            "weightedConflictsV2": doc2["weightedConflicts"], "products": len(doc["products"]),
             "prices": sum(len(ps["p"]) for ps in doc["priceSets"]),
             "branches": report, "files": sizes, "durationSeconds": round(time.monotonic() - t0, 1)}
     write_atomic(os.path.join(args.out, "prices.meta.json"),

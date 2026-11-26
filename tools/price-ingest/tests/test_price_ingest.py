@@ -170,5 +170,97 @@ class FormatTests(unittest.TestCase):
         self.assertEqual(full["branches"][2]["status"], "not_connected")
 
 
+V2_XML = """<Root><Items>
+<Item><ItemCode>7290000211312</ItemCode><ItemName>גבינה</ItemName><ManufactureItemDescription>גבינה לבנה 250 גרם</ManufactureItemDescription>
+<ManufactureName>תנובה</ManufactureName><bIsWeighted>0</bIsWeighted><Quantity>250</Quantity><UnitQty>גרם</UnitQty><ItemPrice>6.50</ItemPrice></Item>
+<Item><ItemCode>706</ItemCode><ItemName>עגבניות</ItemName><ManufactureName>לא ידוע</ManufactureName><bIsWeighted>1</bIsWeighted><ItemPrice>24.90</ItemPrice><UnitOfMeasurePrice>24.90</UnitOfMeasurePrice></Item>
+<Item><ItemCode>102</ItemCode><ItemName>חסה</ItemName><ManufactureName>מבצעי ראש השנה</ManufactureName><bIsWeighted>0</bIsWeighted><ItemPrice>6</ItemPrice></Item>
+<Item><ItemCode>55</ItemCode><ItemName>שקית ניילון</ItemName><ItemPrice>0.30</ItemPrice></Item>
+<Item><ItemCode>56</ItemCode><ItemName>דמי משלוח</ItemName><ItemPrice>25</ItemPrice></Item>
+<Item><ItemCode>57</ItemCode><ItemName>פלפל</ItemName><ItemPrice>0.05</ItemPrice></Item>
+<Item><ItemCode></ItemCode><ItemName>ללא קוד</ItemName><ItemPrice>5</ItemPrice></Item>
+</Items></Root>"""
+
+
+class V2Tests(unittest.TestCase):
+    def setUp(self):
+        self.rows, self.stats = pi.parse_price_file_ex(V2_XML.encode("utf-8"))
+
+    def test_local_rows_kept_and_counted(self):
+        self.assertEqual(set(self.rows), {"7290000211312", "L:706", "L:102"})
+        self.assertEqual((self.stats["keptBarcoded"], self.stats["keptLocal"]), (1, 2))
+        self.assertEqual(self.stats["dropped"], {"invalidPrice": 1, "noName": 0, "noCode": 1,
+                                                 "nonGoods": 2, "duplicate": 0})
+
+    def test_weighted_and_brand(self):
+        self.assertEqual(self.rows["L:706"]["weighted"], 1)
+        self.assertEqual(self.rows["L:102"]["weighted"], 0)
+        self.assertEqual(self.rows["7290000211312"]["brand"], "תנובה")
+        self.assertEqual(self.rows["L:706"]["brand"], "")
+        self.assertEqual(self.rows["L:102"]["brand"], "")  # department label is noise
+
+    def test_longer_name_preferred(self):
+        self.assertEqual(self.rows["7290000211312"]["longName"], "גבינה לבנה 250 גרם")
+        self.assertEqual(self.rows["7290000211312"]["name"], "גבינה")
+
+    def test_v1_view_unchanged(self):
+        rows, skipped = pi.parse_price_file(V2_XML.encode("utf-8"))
+        self.assertEqual(set(rows), {"7290000211312"})
+        self.assertEqual(skipped, 6)
+
+    def _docs(self):
+        other, _ = pi.parse_price_file_ex(V2_XML.replace("24.90", "26.00").encode("utf-8"))
+        other["L:706"]["weighted"] = 0
+        branches = [{"id": "shukhair-004", "status": "available"},
+                    {"id": "netto-054", "status": "available"}]
+        per = {"shukhair-004": (self.rows, "f1", "2026-11-26T04:00:00Z"),
+               "netto-054": (other, "f2", "2026-11-26T05:00:00Z")}
+        now = dt.datetime(2026, 11, 26, 7, 30, tzinfo=dt.timezone.utc)
+        return (pi.build_documents(branches, per, "x", now),
+                pi.build_documents(branches, per, "x", now, v2=True))
+
+    def test_v1_shape_unchanged_and_excludes_local(self):
+        d1, _ = self._docs()
+        self.assertEqual(d1["format"], "columnar-v1")
+        self.assertEqual(d1["productCols"], ["productId", "barcode", "name", "packageLabel", "unit"])
+        self.assertEqual(len(d1["products"]), 1)
+        self.assertEqual(len(d1["products"][0]), 5)
+        self.assertEqual(d1["products"][0][2], "גבינה")
+        self.assertNotIn("weightedConflicts", d1)
+
+    def test_v2_roundtrip(self):
+        _, d2 = self._docs()
+        self.assertEqual(d2["format"], "columnar-v2")
+        self.assertEqual(d2["productCols"][-3:], ["weighted", "brand", "local"])
+        self.assertEqual(len(d2["products"]), 5)  # 1 barcoded + 2 local x 2 chains
+        self.assertEqual(d2["products"][0][0], 7290000211312)
+        ids = [p[0] for p in d2["products"]]
+        self.assertIn("L-shukhair-706", ids)
+        self.assertIn("L-netto-706", ids)
+        self.assertEqual(d2["weightedConflicts"], 0)
+        full = pi.expand_columnar_v2(d2)
+        tom = {p["productId"]: p for p in full["products"]}["L-shukhair-706"]
+        self.assertEqual((tom["barcode"], tom["weighted"], tom["local"], tom["name"]), ("", True, True, "עגבניות"))
+        price = {(x["branchId"], x["productId"]): x for x in full["prices"]}
+        self.assertEqual(price[("shukhair-004", "L-shukhair-706")]["priceAgorot"], 2490)
+        self.assertEqual(price[("netto-054", "L-netto-706")]["priceAgorot"], 2600)
+        self.assertEqual(price[("netto-054", "L-netto-706")]["unitPriceAgorot"], 2600)
+        self.assertEqual(price[("shukhair-004", "7290000211312")]["priceAgorot"], 650)
+        cheese = {p["productId"]: p for p in full["products"]}["7290000211312"]
+        self.assertEqual((cheese["name"], cheese["brand"], cheese["local"]), ("גבינה לבנה 250 גרם", "תנובה", False))
+
+    def test_weighted_any_branch_and_conflict_count(self):
+        branches = [{"id": "osherad-003"}, {"id": "osherad-026"}]
+        a, _ = pi.parse_price_file_ex(V2_XML.encode("utf-8"))
+        b, _ = pi.parse_price_file_ex(V2_XML.encode("utf-8"))
+        a["7290000211312"]["weighted"] = 1
+        per = {"osherad-003": (a, "f", "t"), "osherad-026": (b, "f", "t")}
+        d = pi.build_documents(branches, per, "x", None, v2=True)
+        cheese = [p for p in d["products"] if p[1] == "7290000211312"][0]
+        self.assertEqual(cheese[5], 1)
+        self.assertEqual(d["weightedConflicts"], 1)
+        self.assertEqual(len([p for p in d["products"] if p[7]]), 2)  # same chain: merged
+
+
 if __name__ == "__main__":
     unittest.main()
