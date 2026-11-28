@@ -1,0 +1,153 @@
+{
+ "version": "202611281425",
+ "generatedAt": "2026-11-28T14:25:22Z",
+ "format": "columnar-v1",
+ "promoIgnored": true,
+ "formatV2": "columnar-v2",
+ "productsV2": 23360,
+ "weightedProductsV2": 2015,
+ "weightedConflictsV2": 6,
+ "products": 22570,
+ "prices": 55856,
+ "branches": {
+  "shukhair-004": {
+   "status": "available",
+   "items": 6081,
+   "skippedRows": 426,
+   "keptBarcoded": 6081,
+   "keptLocal": 424,
+   "dropped": {
+    "invalidPrice": 0,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 2,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290058148776-000-004-20261128-060314.GZ",
+   "seconds": 10.6
+  },
+  "netto-054": {
+   "status": "available",
+   "items": 6156,
+   "skippedRows": 302,
+   "keptBarcoded": 6156,
+   "keptLocal": 299,
+   "dropped": {
+    "invalidPrice": 1,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 2,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290058156016-010-054-20261128-000439.GZ",
+   "seconds": 9.7
+  },
+  "zolbegadol-024": {
+   "status": "available",
+   "items": 3963,
+   "skippedRows": 77,
+   "keptBarcoded": 3963,
+   "keptLocal": 67,
+   "dropped": {
+    "invalidPrice": 0,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 10,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290058173198-000-024-20261128-040351.GZ",
+   "seconds": 9.1
+  },
+  "osherad-003": {
+   "status": "available",
+   "items": 6518,
+   "skippedRows": 0,
+   "keptBarcoded": 6518,
+   "keptLocal": 0,
+   "dropped": {
+    "invalidPrice": 0,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 0,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290103152017-001-003-20261128-140501.gz",
+   "seconds": 12.0
+  },
+  "osherad-026": {
+   "status": "available",
+   "items": 6542,
+   "skippedRows": 0,
+   "keptBarcoded": 6542,
+   "keptLocal": 0,
+   "dropped": {
+    "invalidPrice": 0,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 0,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290103152017-001-026-20261128-140501.gz",
+   "seconds": 2.6
+  },
+  "osherad-028": {
+   "status": "available",
+   "items": 6043,
+   "skippedRows": 0,
+   "keptBarcoded": 6043,
+   "keptLocal": 0,
+   "dropped": {
+    "invalidPrice": 0,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 0,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290103152017-001-028-20261128-140501.gz",
+   "seconds": 3.1
+  },
+  "ramilevy-003": {
+   "status": "available",
+   "items": 7626,
+   "skippedRows": 0,
+   "keptBarcoded": 7626,
+   "keptLocal": 0,
+   "dropped": {
+    "invalidPrice": 0,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 0,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290058140886-001-003-20261128-120006.gz",
+   "seconds": 12.7
+  },
+  "ramilevy-001": {
+   "status": "available",
+   "items": 12927,
+   "skippedRows": 3,
+   "keptBarcoded": 12927,
+   "keptLocal": 0,
+   "dropped": {
+    "invalidPrice": 3,
+    "noName": 0,
+    "noCode": 0,
+    "nonGoods": 0,
+    "duplicate": 0
+   },
+   "file": "PriceFull7290058140886-001-001-20261128-121500.gz",
+   "seconds": 4.2
+  }
+ },
+ "files": {
+  "prices.json": {
+   "rawBytes": 2879918,
+   "gzipBytes": 605596
+  },
+  "prices-v2.json": {
+   "rawBytes": 3364666,
+   "gzipBytes": 665191
+  }
+ },
+ "durationSeconds": 65.5
+}
